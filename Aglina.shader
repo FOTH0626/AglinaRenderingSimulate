@@ -11,10 +11,39 @@ Shader "Foth/Aglina"
         [NoScaleOffset]_OtherTex ("Other Texture",2D) = "white"{}
         [NoScaleOffset]_OtherTex2 ("Other Texture 2",2D) = "white"{}
         [NoScaleOffset]_OtherTex3 ("Other Texture 3",2D) = "white"{}
+        [NoScaleOffset]_OtherTex4 ("Other Texture 4",2D) = "white"{}
         
+        [HideInInspector]_HeadCenter  ("Head Center",Vector)  = (0,0,0)
+        [HideInInspector]_HeadForward ("Head Forward",Vector) = (0,0,0)
+        [HideInInspector]_HeadRight   ("Head Right",Vector)   = (0,0,0)       
+        
+        
+        [Space(10)]
+        _EmissionColor("Emission Color",Color) = (1,1,1,1)
+        _EmissionIntensity("Emission Intensity",Range(1,10)) = 1
+
+        [Header(DisneyPBR)]
+        _Subsurface ("Subsurface", Range(0,1)) = 0
+        _Specular ("Specular", Range(0,1)) = 0.5
+        _SpecularTint ("Specular Tint", Range(0,1)) = 0
+        _Anisotropic ("Anisotropic", Range(0,1)) = 0
+        _Sheen ("Sheen", Range(0,1)) = 0
+        _SheenTint ("Sheen Tint", Range(0,1)) = 0.5
+        _Clearcoat ("Clearcoat", Range(0,1)) = 0
+        _ClearcoatGloss ("Clearcoat Gloss", Range(0,1)) = 1
+        
+        [Header(Hair)]
+        _PrimaryShift("Primary Shift",Range(0,1)) = 0
+        _SpecularColor("Specular Color",Color) = (1,1,1,1)
+        _SpecExponent("Specular Exponent",Range(1,10)) = 1
+        _SpecularThreshold("Specular Threshold",Range(0,0.2)) = 0
+        _SpecularRange ("Specular Range", Range(0,1)) = 0.01
+
+        
+        
+        
+        [Space(30)]
         _AlphaClip("Alpha Clipping",Range(0,1))=0.333
-        
-        _Strength("AO Strength", Range(0,1)) = 0.01
         
         [Header(Outline)]
         [Toggle(_OUTLINE_PASS)] _Outline("Outline",Float) = 1
@@ -64,9 +93,18 @@ Shader "Foth/Aglina"
         #pragma shader_feature_local _DOMAIN_HAIR
         #pragma shader_feature_local _DOMAIN_CLOTH
 
+        #pragma multi_compile _ _MAIN_LIGHT_SHADOWS
+        #pragma multi_compile _ _MAIN_LIGHT_SHADOWS_CASCADE
+        #pragma multi_compile _ _MAIN_LIGHT_SHADOWS SCREEN
+
+        #pragma multi_compile_fragment _ _SCREEN_SPACE_OCCLUSION
+        #pragma multi_compile_fragment _ _ADDITIONAL_LIGHT_SHADOWS
+        #pragma multi_compile_fragment _ _SHADOWS_SOFT
+        
+
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
-        #include "fothPBS.hlsl"
+        #include "DisneyPBR.hlsl"
 
         float3 OctToUnitVector(float2 oct)
         {
@@ -75,6 +113,40 @@ Shader "Foth/Aglina"
           N.x += N.x >= 0 ? (-t) : t;
           N.y += N.y >= 0 ? (-t) : t;
           return normalize(N);
+        }
+
+        float3 GetLutColor(float3 OriginColor, sampler2D Lut)
+        {
+            //1024 * 32 texture
+            float height = 31 * OriginColor.b;
+            float lutLevel = floor(height);
+            float tirilinearPercentage =  height - lutLevel;
+            float lowU = (OriginColor.r / 32) + lutLevel * (1.0/32);
+            float highU = (OriginColor.r / 32) + (lutLevel + 1.0) * (1.0/32);
+            float V = OriginColor.g;
+            float2 lowUV = float2(lowU,V);
+            float2 highUV = float2(highU,V);
+
+            return lerp(tex2D(Lut,lowUV), tex2D(Lut,highUV),tirilinearPercentage).rgb;
+        }
+
+        float3 TTShiftTangent(float3 T, float3 N, float shift)
+        {
+            return normalize(T + N * shift);
+        }
+
+        float StrandSpecular(float3 T, float3 V, float3 L, float exponent)
+        {
+            float3 halfDir     = normalize(L + V);
+            float dotTH    = dot(T, halfDir);
+            float sinTH    = max(0.01, sqrt(1 - pow(dotTH, 2)));
+            float dirAtten     = smoothstep(-1, 0, dotTH); 
+            // real dirAttn = saturate(TdotH + 1.0);
+            return dirAtten * pow(sinTH, exponent);
+        }
+
+        float random (float2 st) {
+            return frac(sin(dot(st, float2(12.9898,78.233) ) )*43758.5453123);
         }
 
         CBUFFER_START(UnityPerMaterial)
@@ -86,14 +158,37 @@ Shader "Foth/Aglina"
         sampler2D _OtherTex;
         sampler2D _OtherTex2;
         sampler2D _OtherTex3;
+        sampler2D _OtherTex4;
+
+        float3 _HeadCenter;
+        float3 _HeadForward;
+        float3 _HeadRight;
+
+        float _Subsurface;
+        float _Specular;
+        float _SpecularTint;
+        float _Anisotropic;
+        float _Sheen;
+        float _SheenTint;
+        float _Clearcoat;
+        float _ClearcoatGloss;
         
         float _AlphaClip;
+        float4 _EmissionColor;
+        float _EmissionIntensity;
+
 
         float3 _OutlineColor;
         float _OutlineWidth;
         float _MaxOutlineZOffset;
 
-        float _Strength;
+
+        float _PrimaryShift;
+        float3 _SpecularColor;
+        float _SpecExponent;
+        float _SpecularThreshold;
+        float _SpecularRange;
+
         
         CBUFFER_END
         
@@ -137,24 +232,33 @@ Shader "Foth/Aglina"
             return output;
         }
 
-        float4 MainFS (UniversalVaryings input) : SV_Target
+        float4 MainFS (UniversalVaryings input, bool isFrontFace : SV_IsFrontFace) : SV_Target
         {
             float3 normalWS = normalize(input.normalWS);
+            normalWS *= isFrontFace ? 1 : -1 ;
+            
             float3 positionWS = input.positionWSAndFogFactor.xyz;
             float3 viewDirWS = normalize(input.viewDirectionWS);
             float3 tangentWS = normalize(input.tangentWS.xyz);
             float3 bitangentWS = input.tangentWS.w * cross(normalWS, tangentWS);
 
+            float2 uv = input.uv;
+
             float4 shadowCoord = TransformWorldToShadowCoord(positionWS);
             Light mainLight = GetMainLight(shadowCoord);
             
-            float3 lightDirectionWS = normalize(mainLight.direction);
-            float3 lightColor = mainLight.color;
+            float3 mainlightDirectionWS = normalize(mainLight.direction);
 
-            float4 MainTex = tex2D(_BaseColorTex,input.uv);
+            float3 mainlightColor = mainLight.color;
+
+            float4 MainTex = tex2D(_BaseColorTex,uv);
             
             float3 baseColor = MainTex.rgb;
             baseColor *= _Color;
+
+            float3 finalColor = baseColor;
+
+
 
             float baseAlpha = 1.0;
             #if _DOMAIN_HAIR
@@ -164,22 +268,41 @@ Shader "Foth/Aglina"
             #endif
             
 
-            float NdotL = dot(normalWS, lightDirectionWS);
-            float HalfLambert = 0.5 * NdotL + 0.5;
+            float NoL = dot(normalWS, mainlightDirectionWS);
+            float RemapNoL = 0.5 * NoL + 0.5;
+            float halfLambert = RemapNoL * RemapNoL;
 
-            float4 otherData = tex2D(_OtherTex, input.uv);
-            float4 otherData2 = tex2D(_OtherTex2, input.uv);
+            float4 otherData = tex2D(_OtherTex, uv);
+            float4 otherData2 = tex2D(_OtherTex2, uv);
 
-            float3 rampColor = tex2D(_RampMap,float2(HalfLambert,1));
-            baseColor *= rampColor;
+            float3 rampColor = tex2D(_RampMap,float2(halfLambert,1));
+
+            float3 rampDiffuse = lerp( rampColor* baseColor, baseColor ,halfLambert);
+
             
-            
 
+            // Multi Light Cloth PBR
             #if _DOMAIN_CLOTH
             {
+                //TODO：Guess and Explain an other shading moding in id 2
+                
                 float metallic = otherData.r;
                 float ao = otherData.b;
                 float roughness = otherData.a;
+                DisneyBrdfData brdfData;
+                {
+                    brdfData.albedo = baseColor;
+                    brdfData.subSurface = _Subsurface;
+                    brdfData.anisotropic = _Anisotropic;
+                    brdfData.sheen = _Sheen;
+                    brdfData.sheenTint = _SheenTint;
+                    brdfData.clearcoat = _Clearcoat;
+                    brdfData.clearcoatGloss = _ClearcoatGloss;
+                    brdfData.specular = _Specular;
+                    brdfData.specularTint = _SpecularTint;
+                    brdfData.metallic = metallic;
+                    brdfData.roughness = roughness;
+                }
                 
                 float3 pixelNormalTS;
                 pixelNormalTS.xyz = otherData2.rgb;
@@ -187,17 +310,210 @@ Shader "Foth/Aglina"
                 // return float4(pixelNormalTS,1);
                 float3 pixelNormalWS = TransformTangentToWorld(pixelNormalTS, float3x3(tangentWS,bitangentWS,normalWS));
                 pixelNormalWS = normalize(pixelNormalWS);
+                pixelNormalWS *= isFrontFace ? 1 : -1;
 
-                float3 pbrColor = CookTorranceBRDF(baseColor, metallic, roughness, pixelNormalWS, lightDirectionWS, viewDirWS);
-                pbrColor = saturate(pbrColor);
-                pbrColor *= ao ;
+                float3 pbrColor =mainLight.color*mainLight.shadowAttenuation * mainLight.distanceAttenuation* DisneyBrdf(mainlightDirectionWS,
+                                                viewDirWS,
+                                                pixelNormalWS,
+                                                tangentWS,bitangentWS,brdfData);
                 
-                return float4(pbrColor, 1 );
+                // Addition Light Cloth PBR
+                float3 SumAdditionalLightColor = 0;
+                {
+                    uint pixelLightCount = GetAdditionalLightsCount();
+                    LIGHT_LOOP_BEGIN(pixelLightCount)
+                        float3 additionalLightColor = 0;
+                        Light additionalLight = GetAdditionalLight(lightIndex, positionWS,half4(1,1,1,1));
+                    
+                        float3 additionalLightDir = additionalLight.direction;
+                        additionalLightDir = normalize(additionalLightDir);
+                    
+                        float additionNoL = dot(normalWS, additionalLightDir);
+                        additionalLightColor += additionNoL > 0 ? DisneyBrdf(additionalLightDir,viewDirWS,pixelNormalWS,tangentWS,bitangentWS,brdfData) : 0;
+
+                        additionalLightColor *= additionalLight.color
+                                                * additionalLight.distanceAttenuation
+                                                * additionalLight.shadowAttenuation ;
+
+                        SumAdditionalLightColor += additionalLightColor;
+
+                    LIGHT_LOOP_END
+                }
+
+                float3 ambient = SampleSH(pixelNormalWS);
+                ambient *= ao;
+
+                finalColor = ambient*0.05 + saturate(pbrColor) + saturate(SumAdditionalLightColor);
+
+            }
+            #endif
+            
+      
+            //Cloth Emission
+            #if _DOMAIN_CLOTH
+            {
+                float3 emission = tex2D(_OtherTex3,uv);
+                emission *= _EmissionColor.xyz * _EmissionIntensity;
+
+                finalColor += emission;
+            }
+            #endif
+
+
+
+            #if _DOMAIN_HAIR
+            {
+
+                // _PrimaryShift("Primary Shift",Range(0,1)) = 0
+                // _SpecularColor("Specular Color",Color) = (1,1,1,1)
+                // _SpecExponent("Specular Exponent",Range(0,10)) = 1
+                // _SpecularThreshold("Specular Threshold",Range(0,1)) = 0.5
+
+                bool isFrontHair = otherData2.r < 0.5;
+                
+                //point from root to hair tip
+                float3 hairTangentWS = -bitangentWS;
+
+                float ao = otherData2.b;
+                float pixelShiftTangent = tex2D(_OtherTex3,uv).r;
+                
+                float3 pixelNormalTS = otherData.rgb;
+                float3x3 tbn = float3x3(tangentWS,bitangentWS,normalWS);
+                float3 pixelNormalWS = TransformTangentToWorld(pixelNormalTS, tbn);
+
+                float3 sphereNormalWS = normalize(positionWS - _HeadCenter);
+
+
+
+
+                hairTangentWS = hairTangentWS + _PrimaryShift * pixelShiftTangent * pixelNormalWS;
+                
+                float3 halfVector = normalize(viewDirWS + mainlightDirectionWS);
+                float dotTH = dot(hairTangentWS, halfVector);
+                float sinTH = sqrt(1.0 - min(1.0,dotTH * dotTH) );
+                float dirAtten = smoothstep(-1, 0, dotTH);
+                
+
+                float3 specularStrength = dirAtten * pow(sinTH, _SpecExponent);
+                
+                specularStrength *=  _SpecularColor.rgb;
+
+                // float3 diffuse = baseColor * 
+
+                float3 headForwardWS = normalize(_HeadForward- _HeadCenter);
+                float3 headRightWS = normalize(_HeadRight- _HeadCenter);
+                float3 headUpWS = normalize(cross(headForwardWS, headRightWS));
+
+                float dotUpSphere = dot(sphereNormalWS, headUpWS);
+                dotUpSphere = dotUpSphere * 0.5 + 0.5;
+                
+
+                float viewDirProjHeadUp = dot(viewDirWS,headUpWS);
+
+                float remapViewProjHeadUp = 0.65  + smoothstep(0,1,viewDirProjHeadUp)*0.4;
+                remapViewProjHeadUp += 0.025 * pixelShiftTangent;
+                remapViewProjHeadUp *= isFrontHair;
+                
+                float lowerBound = smoothstep(dotUpSphere+_SpecularRange,dotUpSphere,remapViewProjHeadUp + _SpecularThreshold);//remapViewProjHeadUp < dotUpSphere ?  1   : 0;
+
+                // float c = a > dotUpSphere - 0.07 ? 1 :0 ; 
+                float upperBound = smoothstep(dotUpSphere - _SpecularRange, dotUpSphere, remapViewProjHeadUp + _SpecularThreshold);
+                float specularUpperBound = smoothstep(0.98,0.9,dotUpSphere) ;
+
+                float spcularArea = remapViewProjHeadUp * lowerBound * upperBound * specularUpperBound * otherData2.g ;
+
+                float pixelSpecularArea = tex2D(_OtherTex2,uv).g;
+                spcularArea *= pixelSpecularArea;
+
+                specularStrength *= spcularArea * pow(dot(pixelNormalWS,halfVector),2);
+
+                float noFrontHairSpecular = pow(dot(pixelNormalWS, halfVector),5) ;
+
+                baseColor *= ao;
+
+                finalColor =  rampDiffuse +  baseColor * lerp(noFrontHairSpecular,specularStrength,isFrontHair)  ;
+                
+                return float4( finalColor,baseAlpha);
+            }
+            #endif
+
+
+            #if _DOMAIN_FACE
+            {
+                
+                float3 headForwardWS = normalize(_HeadForward- _HeadCenter);
+                float3 headRightWS = normalize(_HeadRight- _HeadCenter);
+                float3 headUpWS = normalize(cross(headForwardWS, headRightWS));
+                
+                // bool atFaceFront = dot(headForwardWS,viewDirWS) > 0 ? true : false ;
+                // bool atFaceRight = dot(headRightWS,viewDirWS) > 0 ? true : false;
+
+                float3 viewDirProjHeadWS = viewDirWS - dot(viewDirWS,headUpWS) * headUpWS;
+                viewDirProjHeadWS = normalize(viewDirProjHeadWS);
+
+                float VoR = dot(viewDirProjHeadWS,headRightWS);
+
+                bool viewOnFaceRight = VoR > 0;
+
+    
+
+                float UvUoffset = 0.04 * (saturate(VoR + 0.5) * 2 -1);
+
+                float3 lipsSpecular = tex2D(_OtherTex, float2(uv.x+UvUoffset,uv.y));
+
+                //max offset is 0.04
+
+                //otherData 2 : r ?
+                // g : sdf mask ,white stands for light ,black stands for sdf
+
+
+                // otherData3.r is sdf tex
+
+                float3 lightDirProjHeadWS = mainlightDirectionWS - dot(mainlightDirectionWS,headUpWS) * headUpWS;
+                lightDirProjHeadWS = normalize(lightDirProjHeadWS);
+
+                float sinX = dot(lightDirProjHeadWS,headRightWS);
+                float cosX = dot(lightDirProjHeadWS,-headForwardWS);
+
+                float angleThreshold = atan2(sinX,cosX)/3.1415926;
+
+                angleThreshold = angleThreshold > 0 ? (1-angleThreshold) : (1+angleThreshold);
+
+                float2 sdfUV = uv;
+
+                if (sinX < 0 )
+                {
+                    sdfUV.x = 1 - sdfUV.x;
+                }
+        
+                float4 otherData3 = tex2D(_OtherTex3, sdfUV);
+                //TODO : it seems that 3 channel refering diffirent weather
+                float sdfMap = otherData3.b;
+                
+                
+                // 1 is in light , 0 is shadow
+                float sdfShadow = smoothstep(angleThreshold-0.03,angleThreshold,sdfMap);
+
+
+                float3 sdfFace = lerp(baseColor*0.4,baseColor, sdfShadow);
+
+                float lerpNoL = otherData2.g;
+
+                 float3 a = lerp(sdfFace,rampDiffuse,lerpNoL);
+
+                lipsSpecular *= sdfShadow;
+
+
+                
+
+                return float4(a+lipsSpecular,1);
             }
             #endif
             
             
-            return float4(baseColor,1);
+            
+            
+            return float4(finalColor,baseAlpha);
         } 
         
         ENDHLSL
@@ -208,7 +524,7 @@ Shader "Foth/Aglina"
             Name "ShadowCaster"
             Tags
             {
-            "LightMode"="ShadowCaster"
+                "LightMode"="ShadowCaster"
             }
             ZWrite [_ZWrite]
             ZTest LEqual
@@ -403,6 +719,8 @@ Shader "Foth/Aglina"
             
             ENDHLSL
         }
+
+
         //Outline Pass
         Pass
         {
@@ -413,6 +731,14 @@ Shader "Foth/Aglina"
             }
             Cull Front
             ZWrite On
+            Stencil
+            {
+                Ref [_StencilRef]
+                Comp [_StencilComp]
+                Pass [_StencilPassOp]
+                Fail [_StencilFailOp]
+                ZFail [_StencilZFailOp]
+            }
             
             HLSLPROGRAM
 
